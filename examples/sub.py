@@ -4,15 +4,24 @@
 import argcmd
 
 
-def opts_foo(parser):
-    parser.add_argument('-b', '--bar')
+def some_crazy_name(parser):
+    parser.add_argument('-a', '--arg', default='1', help='arg help [%(default)s]')
 
 
-def cmd_foo(args):
-    """Example foo"""
-    print args.bar
+@argcmd.command(some_crazy_name)
+def foo(args):
+    """Registered via decorator"""
+    print args.arg
+
+
+def args_bar(parser):
+    parser.add_argument('arg', help='arg help')
+
+
+def cmd_bar(args):
+    """Registered via name"""
+    print args.arg
 
 
 if __name__ == '__main__':
-    # TODO hide globals
-    argcmd.main(globals())
+    argcmd.main()
