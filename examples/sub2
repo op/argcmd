@@ -1,0 +1,34 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import argcmd
+
+
+class Example(argcmd.ArgCommand):
+    def __init__(self):
+        print 'construct'
+
+    def init(self):
+        print 'init'
+
+    def exit(self):
+        print 'exit'
+
+    def some_crazy_name(self, parser):
+        parser.add_argument('-a', '--arg', default='1', help='arg help [%(default)s]')
+
+    @argcmd.command('some_crazy_name')
+    def foo(self, args):
+        """Registered via decorator"""
+        print args.arg
+
+    def args_bar(self, parser):
+        parser.add_argument('arg', help='arg help')
+
+    def cmd_bar(self, args):
+        """Registered via name"""
+        print 'bar!'
+
+
+if __name__ == '__main__':
+    argcmd.main(shell=True)
