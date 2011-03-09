@@ -19,6 +19,7 @@ import os
 import re
 import readline
 import sys
+import traceback
 
 from gettext import gettext as _
 
@@ -26,46 +27,62 @@ CMD_NAME = 'cmd_'
 ARGS_NAMES = ['args_', 'opts_']
 
 
+def _dir_obj(obj):
+    if isinstance(obj, basestring):
+        obj = __import__(obj)
+
+    for name in dir(obj):
+        if not name.startswith('_'):
+            yield name, getattr(obj, name)
+
+
+def _get_callables(obj, filtered=True):
+    return dict((name, attr) for name, attr in _dir_obj(obj)
+                             if callable(attr) and
+                                (not filtered or not isinstance(attr, command)))
+
+
+def _get_cmd_name(name):
+    if name.startswith(CMD_NAME):
+        return name[len(CMD_NAME):]
+    else:
+        return None
+
+
+def _get_args_func(cmd_name, callables):
+    for args_name in ARGS_NAMES:
+        args_cmd = callables.get(args_name + cmd_name)
+        if args_cmd:
+            return args_cmd
+
+
 def _get_commands(module):
-    # collect all callables and argcommands
-    argcmds, callables = [], {}
-    for name in dir(module):
-        if name.startswith('_'):
-            continue
-        obj = getattr(module, name)
+    # find all who inherits from argcmd
+    argcmds = []
+    for name, obj in _dir_obj(module):
         try:
-            if issubclass(obj, ArgCommand):
+            if issubclass(obj, ArgCmd):
                 argcmds.append(obj)
                 continue
         except:
-            if callable(obj):
-                callables[name] = obj
-                continue
+            pass
 
-    # find all callables for the class
+    # find all callables and callables for inherited
+    callables = _get_callables(module)
     for argcmd in argcmds:
         obj = argcmd()
-        for name in dir(obj):
-            if name.startswith('_'):
-                continue
-            f = getattr(obj, name)
+        obj_callables = _get_callables(obj, False)
+        for name, f in obj_callables.items():
             if isinstance(f, command):
-                # transpose function string name
-                if isinstance(f.args, basestring):
-                    f.args = getattr(obj, f.args)
-            elif callable(f):
-                callables[name] = f
+                obj_callables.pop(name)
+
+        callables.update(obj_callables)
 
     # find all cmd_ functions
     for name, func in callables.iteritems():
-        if name.startswith(CMD_NAME):
-            cmd = name.replace(CMD_NAME, '', 1)
-            # find matching args_ function
-            for args_name in ARGS_NAMES:
-                args_cmd = callables.get(args_name + cmd)
-                if args_cmd:
-                    break
-            yield func, args_cmd
+        cmd_name = _get_cmd_name(name)
+        if cmd_name is not None:
+            yield func, _get_args_func(cmd_name, callables)
 
 
 _indent_re = re.compile(r'(\s+)\S')
@@ -118,10 +135,14 @@ class command(object):
     """
     __commands = {}
 
-    def __init__(self, args=None):
+    def __init__(self, args=None, alias=None):
         self.name = None
         self.func = None
         self.args = args
+
+        if alias and isinstance(alias, basestring):
+            alias = [alias]
+        self.aliases = alias
 
     def __call__(self, f, *args, **kwargs):
         if f.func_name in self.__commands:
@@ -131,6 +152,8 @@ class command(object):
         self.name = cmd.replace('_', '-')
         self.func = _CommandExecutor(f)
 
+        self.__name__ = f.__name__
+
         self.__commands[self.name] = self
         return self
 
@@ -139,7 +162,93 @@ class command(object):
         return cls.__commands.itervalues()
 
 
-class ArgCommand(object):
+class _ExtraDecorator(object):
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    def __call__(self, f, *args, **kwargs):
+        if not isinstance(f, command):
+            print 'hej', dir(f)
+            cmd = command()(f, *args, **kwargs)
+
+            if cmd.args is None:
+                callables = _get_callables(f.__module__)
+                cmd_name = _get_cmd_name(f.func_name)
+                if cmd_name is not None:
+                    cmd.args = _get_args_func(cmd_name, callables)
+        else:
+            cmd = f
+
+        return cmd
+
+
+class alias(_ExtraDecorator):
+    """Command alias decorator
+
+    Adds an alias to a command.
+
+    Arguments:
+        alias       -- alias(es) to be added (str or iterable)
+    """
+    def __call__(self, f, *args, **kwargs):
+        cmd = super(argument, self).__call__(f, *args, **kwargs)
+
+        # be lazy and let python handle keyword args etc
+        self._add_aliases(cmd, *self.args, **self.kwargs)
+
+        return cmd
+
+    def _add_aliases(self, cmd, alias):
+        # combine all aliases and retain order
+        if isinstance(alias, basestring):
+            alias = [alias]
+        if cmd.aliases is None:
+            cmd.aliases = []
+        cmd.aliases = sum((cmd.aliases, alias), [])
+
+
+class argument(_ExtraDecorator):
+    """Add argument decorator
+
+    See ``argparse`` for syntax. Example:
+        @argcmd.argument('-f', '--foobar', ...)
+    """
+    def __call__(self, f, *args, **kwargs):
+        cmd = super(argument, self).__call__(f, *args, **kwargs)
+
+        # chain the old args function together
+        def args_wrapper(parser):
+            parser.add_argument(*self.args, **self.kwargs)
+            if args_wrapper.args is not None:
+                args_wrapper.args(parser)
+
+        args_wrapper.args = cmd.args
+        cmd.args = args_wrapper
+
+        return cmd
+
+
+class ArgCmd(object):
+    def __new__(cls):
+        obj = object.__new__(cls)
+
+        for name, attr in _dir_obj(obj):
+            if isinstance(attr, command):
+                # for @command decorator for ArgCmd class, there's sometimes no
+                # way to reference a function, eg the function is within the
+                # same class and the class has not been created -- therefor we
+                # allow the callback to be a string. here we transpose the
+                # string to a func.
+                prev, f = attr, attr.args
+                while hasattr(f, 'args'):
+                    prev, f = f, f.args
+                if isinstance(f, basestring):
+                    prev.args = getattr(obj, f)
+
+                # TODO is there a way to fix class functions?
+        return obj
+
     def init(self):
         """Called before first command is run"""
         pass
@@ -222,18 +331,21 @@ def _run_command(func, args):
     except SystemExit, exc:
         return exc, exc.code
     except Exception, exc:
-        message = str(exc)
-        if message == '':
-            message = exc.__class__.__name__
         # TODO make a generic color function
         if args.color:
-            prefix, reset = '\x1b[33m', '\x1b[0m'
+            prefix, reset = '\x1b[36m', '\x1b[0m'
         else:
             prefix, reset = '', ''
+
+        # TODO write to error stream and format + colorize
         if args.verbosity > 2:
-            print 'ERRR verbost:', prefix, message, reset
+            traceback.print_exc()
         else:
-            print 'ERR:', prefix, message, reset
+            message = str(exc)
+            if not message:
+                message = type(exc).__name__
+            print 'ERR: %s%s%s' % (prefix, message, reset)
+
         return exc, 128
     else:
         return None, code
@@ -296,9 +408,6 @@ def main(module='__main__', prog=None, shell=False):
     Call this function in your file to automatically populate an argument
     parser and register all your cmd-functions.
     """
-    if isinstance(module, basestring):
-        module = __import__(module)
-
     # automatically populate commands found in module
     if module is not None:
         for cmd_func, cmd_args in _get_commands(module):

@@ -5,10 +5,12 @@ import argcmd
 import os
 
 
-class pysh(argcmd.ArgCommand):
+class pysh(argcmd.ArgCmd):
+    # init callback
     def init(self):
         self.pwd = os.getcwd()
 
+    # exit callback
     def exit(self):
         os.chdir(self.pwd)
 
@@ -16,6 +18,10 @@ class pysh(argcmd.ArgCommand):
         parser.add_argument('-a', '--all', action='store_true', help='do not ignore entries starting with .')
         parser.add_argument('paths', metavar='PATH', nargs='*', default='.', help='directories to list')
 
+    # TODO broken
+    # manually registered with decorator
+    @argcmd.argument('test')
+    @argcmd.command(args='args_ls')
     def cmd_ls(self, args):
         """list files and directories"""
         for path in args.paths:
@@ -24,19 +30,20 @@ class pysh(argcmd.ArgCommand):
                     print f
 
     def args_cd(self, parser):
-        parser.add_argument('path', metavar='PATH', default='.', help='directories to change to')
+        parser.add_argument('path', metavar='PATH', nargs='?', help='directories to change to')
 
+    # automatically matched to args_cd
     def cmd_cd(self, args):
         """change working directory"""
-        os.chdir(args.path)
+        os.chdir(args.path or os.path.expanduser('~'))
 
+    # no arguments
     def cmd_pwd(self, args):
         """present working directory"""
         print os.path.realpath(os.curdir)
 
-    def args_eval(self, parser):
-        parser.add_argument('args', metavar='ARG', nargs='+', help='code to execute')
-
+    # adding arguments using decorator
+    @argcmd.argument('args', metavar='ARG', nargs='+', help='code to execute')
     def cmd_eval(self, args):
         """execute arguments as python code"""
         print eval(' '.join(args.args))

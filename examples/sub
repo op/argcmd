@@ -4,21 +4,18 @@
 import argcmd
 
 
-def some_crazy_name(parser):
+def some_callback(parser):
     parser.add_argument('-a', '--arg', default='1', help='arg help [%(default)s]')
 
 
-@argcmd.command(some_crazy_name)
+@argcmd.command(some_callback)
 def foo(args):
     """Registered via decorator"""
     print args.arg
 
 
-def args_bar(parser):
-    parser.add_argument('arg', help='arg help')
-
-
-def cmd_bar(args):
+@argcmd.argument('arg', help='arg help')
+def bar(args):
     """Registered via name"""
     print args.arg
 
