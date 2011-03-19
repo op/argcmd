@@ -23,17 +23,33 @@ import traceback
 
 from gettext import gettext as _
 
+# prefix for functions to find automatic
 CMD_NAME = 'cmd_'
-ARGS_NAMES = ['args_', 'opts_']
+ARGS_NAMES = ['arg_', 'args_', 'opts_']
+
+# error exit codes
+RC_OK = 0
+RC_CMD_ERROR = 128
+RC_PARSE_ERROR = 2
+
+
+class ArgParseError(Exception):
+    def __init__(self, status, error):
+        self.status = status
+        self.error = error
 
 
 def _dir_obj(obj):
     if isinstance(obj, basestring):
         obj = __import__(obj)
 
-    for name in dir(obj):
-        if not name.startswith('_'):
-            yield name, getattr(obj, name)
+    if isinstance(obj, dict):
+        for key, value in obj.iteritems():
+            yield key, value
+    else:
+        for name in dir(obj):
+            if not name.startswith('_'):
+                yield name, getattr(obj, name)
 
 
 def _get_callables(obj, filtered=True):
@@ -75,6 +91,7 @@ def _get_commands(module):
         for name, f in obj_callables.items():
             if isinstance(f, command):
                 obj_callables.pop(name)
+                command._setup_command(obj, f)
 
         callables.update(obj_callables)
 
@@ -104,10 +121,22 @@ def _get_doc_lines(cmd_func):
 
 
 class _CommandExecutor(object):
+    """Function executor
+
+    Makes sure to call certain functions on an object before first call to
+    that objects function. If the object has been setup, it will also make
+    sure to call tear down.
+    """
     states = {}
+
+    __setup_func = 'init'
+    __teardown_func = 'exit'
 
     def __init__(self, func):
         self.func = func
+
+    def __repr__(self):
+        return '%s(func=%s)' % (self.__class__.__name__, self.func)
 
     @classmethod
     def _call_once(cls, obj, func_name):
@@ -118,14 +147,14 @@ class _CommandExecutor(object):
             return states[obj.im_self]
 
     def __call__(self, *args, **kwargs):
-        self._call_once(self.func, 'init')
+        self._call_once(self.func, self.__setup_func)
         return self.func(*args, **kwargs)
 
     def exit(self):
         if hasattr(self.func, 'im_self'):
-            states = self.states.get('init')
+            states = self.states.get(self.__setup_func)
             if states is not None and self.func.im_self in states:
-                return self._call_once(self.func, 'exit')
+                return self._call_once(self.func, self.__teardown_func)
 
 
 class command(object):
@@ -134,6 +163,27 @@ class command(object):
     Registers a subcommand function.
     """
     __commands = {}
+
+    @classmethod
+    def _get_commands(cls):
+        return cls.__commands.itervalues()
+
+    @classmethod
+    def _slugify(cls, f):
+        name = f.func_name.replace(CMD_NAME, '', 1)
+        return name.replace('_', '-')
+
+    @classmethod
+    def _setup_command(cls, obj, f):
+        # FIXME we shouldn't need to do this. the problem occurs when adding
+        # a decorator to a method of ArgCmd subclass. the __call__ below will
+        # occur before any object exists, hence the registered function will be
+        # missing a proper self object. this is a quick fix to add self to it.
+        f.func.func = functools.partial(f.temp, obj)
+
+    @classmethod
+    def _reset(cls):
+        cls.__commands = {}
 
     def __init__(self, args=None, alias=None):
         self.name = None
@@ -144,22 +194,31 @@ class command(object):
             alias = [alias]
         self.aliases = alias
 
-    def __call__(self, f, *args, **kwargs):
-        if f.func_name in self.__commands:
-            raise KeyError('Duplicate command handler: ' + f.func_name)
+    def __call__(self, *args, **kwargs):
+        if self.func is None:
+            return self._register_command(*args, **kwargs)
+        else:
+            return self.func(*args, **kwargs)
 
-        cmd = f.func_name.replace(CMD_NAME, '', 1)
-        self.name = cmd.replace('_', '-')
+    def _register_command(self, f):
+        assert f is not None, 'Invalid function'
+
+        self.name = self._slugify(f)
         self.func = _CommandExecutor(f)
+        self.temp = f
 
+        # XXX needed?
         self.__name__ = f.__name__
+
+        if self.name in self.__commands:
+            raise KeyError('Duplicate command handler: ' + f.func_name)
 
         self.__commands[self.name] = self
         return self
 
-    @classmethod
-    def _get_commands(cls):
-        return cls.__commands.itervalues()
+    def _add_arguments(self, parser):
+        if callable(self.args):
+            self.args(parser)
 
 
 class _ExtraDecorator(object):
@@ -169,7 +228,6 @@ class _ExtraDecorator(object):
 
     def __call__(self, f, *args, **kwargs):
         if not isinstance(f, command):
-            print 'hej', dir(f)
             cmd = command()(f, *args, **kwargs)
 
             if cmd.args is None:
@@ -264,6 +322,7 @@ class ArgCmd(object):
 
 
 def add_shell_args(parser, prog):
+    # XXX make this configurable
     history_file = '~/.%s-history' % (prog,)
     group = parser.add_argument_group('shell arguments')
     group.add_argument('--history-file', default=history_file, metavar='PATH', help='history [%(default)s]')
@@ -274,11 +333,6 @@ def add_shell_args(parser, prog):
 def run_shell(parser, args):
     """Interactive shell"""
     # TODO add a help command, not just -h
-    # parse the argparse not to exit the program
-    def exit(status=0, message=None):
-        if message:
-            parser._print_message(message, sys.stderr)
-    parser.exit = exit
 
     # tokenize command names for partial searching
     # TODO use a real binary tree
@@ -319,10 +373,14 @@ def run_shell(parser, args):
 
         try:
             args = parser.parse_args(line.split())
+        except ArgParseError, exc:
+            # TODO see below on next ArgParseError
+            sys.stderr.write('%s: error: %s\n' % (parser.prog, exc.error))
         except:
-            continue
-
-        exc, code = _run_command(args.func, args)
+            # TODO
+            raise
+        else:
+            exc, code = _run_command(args.func, args)
 
 
 def _run_command(func, args):
@@ -344,10 +402,12 @@ def _run_command(func, args):
             message = str(exc)
             if not message:
                 message = type(exc).__name__
-            print 'ERR: %s%s%s' % (prefix, message, reset)
+            sys.stdout.write('ERR: %s%s%s\n' % (prefix, message, reset))
 
-        return exc, 128
+        return exc, RC_CMD_ERROR
     else:
+        if code is None:
+            code = RC_OK
         return None, code
 
 
@@ -368,6 +428,13 @@ def _setup_parsers(prog):
     group = help_parser.add_argument_group('global arguments')
     group.add_argument('-h', '--help', action='help', default=argparse.SUPPRESS, help=_('show this help message and exit'))
 
+    def patch_parser(parser):
+        # patch the argparse parser not to exit the program on error
+        def exit(status=RC_OK, message=None):
+            raise ArgParseError(status, message)
+        parser.exit = exit
+        parser.error = functools.partial(exit, RC_PARSE_ERROR)
+
     # create two parsers, one just for running the interactive shell and one
     # for running sub-command directly.
     parsers = []
@@ -377,10 +444,13 @@ def _setup_parsers(prog):
         parser = argparse.ArgumentParser(prog=prog, parents=parents,
                                          formatter_class=formatter_class,
                                          add_help=False)
+
+        patch_parser(parser)
         parsers.append(parser)
 
     # setup the 2nd parser for sub-command
     subparsers = parser.add_subparsers(dest='subparser_name')
+    patch_parser(subparsers)
 
     # setup the parser for all commands
     for cmd in command._get_commands():
@@ -393,20 +463,29 @@ def _setup_parsers(prog):
                                            formatter_class=formatter_class,
                                            help=help, add_help=False,
                                            description=desc)
-        cmd_parser.set_defaults(func=cmd.func)
+        patch_parser(cmd_parser)
 
-        # call the commands args callback for populating it's arguments
-        if callable(cmd.args):
-            cmd.args(cmd_parser)
+        cmd_parser.set_defaults(func=cmd)
+        cmd._add_arguments(cmd_parser)
 
     return parsers
 
 
-def main(module='__main__', prog=None, shell=False):
+def main(module='__main__', prog=None, shell=False, args=None):
     """Main entrance for a program
 
     Call this function in your file to automatically populate an argument
     parser and register all your cmd-functions.
+
+    By default, `module` is set to search from where the execution started.
+    The value can either be the name of a module, an already imported module
+    or a dictionary (similar to what `globals()` and ``locals()``.)
+
+    Keyword arguments:
+        `module`        -- where to automatically search for commands
+        `prog`          -- name of the program
+        `shell`         -- include interactive shell, disabled by default
+        `args`          -- arguments to parse (defaults to sys.argv[1:])
     """
     # automatically populate commands found in module
     if module is not None:
@@ -416,32 +495,39 @@ def main(module='__main__', prog=None, shell=False):
     shell_parser, parser = _setup_parsers(prog)
     func = None
 
+    if args is None:
+        args = sys.argv[1:]
+
     # first try to parse the command line for missing sub-command
     if shell:
-        # make the parser not to exit the program in case of parse error
-        def exit(*args, **kwargs):
-            exit.error = True
-        shell_parser.error = exit
-        shell_parser.exit = exit
-
         # XXX remove these args completley?
         #add_shell_args(parser, shell_parser.prog)
         add_shell_args(shell_parser, shell_parser.prog)
 
         # if successfully parsed, let's start the interactive shell
-        args = shell_parser.parse_args()
-        if not hasattr(exit, 'error'):
+        # XXX rework this to look for an optional sub-command if possible
+        try:
+            cmd_args = shell_parser.parse_args(args)
             func = functools.partial(run_shell, parser)
+        except ArgParseError:
+            pass
 
     # run main parser to see if it's a single run sub-command
     if not func:
-        args = parser.parse_args()
-        func = args.func
+        try:
+            cmd_args = parser.parse_args(args)
+            func = cmd_args.func
+        except ArgParseError, exc:
+            # TODO clean this up and try to use the real error function found
+            # in the argparse package (it's patched away, so this mimics it)
+            sys.stderr.write(parser.format_usage())
+            sys.stderr.write('%s: error: %s\n' % (parser.prog, exc.error))
+            return sys.exit(exc.status)
 
     # run the command and send exit if successful
-    exc, code = _run_command(func, args)
+    exc, code = _run_command(func, cmd_args)
     if exc is None:
         for cmd in command._get_commands():
             cmd.func.exit()
 
-    parser.exit(code)
+    return sys.exit(code)
