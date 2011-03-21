@@ -12,6 +12,13 @@ The latter requires you to name all functions after a certain pattern (eg. cmd_
 and args_). The first is less magic and also recommended.
 """
 
+# TODO
+# - add a help command, not just -h
+# - add colorize function
+# - add logging
+# - beatify errors
+# - check cmd module out
+
 import argparse
 import atexit
 import functools
@@ -37,6 +44,22 @@ class ArgParseError(Exception):
     def __init__(self, status, error):
         self.status = status
         self.error = error
+
+
+class _AliasedSubParsersAction(argparse._SubParsersAction):
+    def add_parser(self, name, **kwargs):
+        aliases = kwargs.pop('aliases', ())
+        for alias in aliases:
+            self.choices[alias] = name
+        return super(_AliasedSubParsersAction, self).add_parser(name, **kwargs)
+
+    def __call__(self, parser, namespace, values, *args, **kwargs):
+        # translate aliased call to real name
+        choice = self.choices.get(values[0])
+        if isinstance(choice, basestring):
+            values = [choice] + values[1:]
+        sup = super(_AliasedSubParsersAction, self)
+        return sup.__call__(parser, namespace, values, *args, **kwargs)
 
 
 def _dir_obj(obj):
@@ -180,6 +203,7 @@ class command(object):
         # occur before any object exists, hence the registered function will be
         # missing a proper self object. this is a quick fix to add self to it.
         f.func.func = functools.partial(f.temp, obj)
+        f.func.func.__doc__ = f.temp.__doc__
 
     @classmethod
     def _reset(cls):
@@ -250,7 +274,7 @@ class alias(_ExtraDecorator):
         alias       -- alias(es) to be added (str or iterable)
     """
     def __call__(self, f, *args, **kwargs):
-        cmd = super(argument, self).__call__(f, *args, **kwargs)
+        cmd = super(alias, self).__call__(f, *args, **kwargs)
 
         # be lazy and let python handle keyword args etc
         self._add_aliases(cmd, *self.args, **self.kwargs)
@@ -303,8 +327,6 @@ class ArgCmd(object):
                     prev, f = f, f.args
                 if isinstance(f, basestring):
                     prev.args = getattr(obj, f)
-
-                # TODO is there a way to fix class functions?
         return obj
 
     def init(self):
@@ -332,8 +354,6 @@ def add_shell_args(parser, prog):
 
 def run_shell(parser, args):
     """Interactive shell"""
-    # TODO add a help command, not just -h
-
     # tokenize command names for partial searching
     # TODO use a real binary tree
     partials = {}
@@ -375,7 +395,8 @@ def run_shell(parser, args):
             args = parser.parse_args(line.split())
         except ArgParseError, exc:
             # TODO see below on next ArgParseError
-            sys.stderr.write('%s: error: %s\n' % (parser.prog, exc.error))
+            if exc.status:
+                sys.stderr.write('%s: error: %s\n' % (parser.prog, exc.error))
         except:
             # TODO
             raise
@@ -444,6 +465,7 @@ def _setup_parsers(prog):
         parser = argparse.ArgumentParser(prog=prog, parents=parents,
                                          formatter_class=formatter_class,
                                          add_help=False)
+        parser.register('action', 'parsers', _AliasedSubParsersAction)
 
         patch_parser(parser)
         parsers.append(parser)
@@ -462,6 +484,7 @@ def _setup_parsers(prog):
         cmd_parser = subparsers.add_parser(cmd.name, parents=parents,
                                            formatter_class=formatter_class,
                                            help=help, add_help=False,
+                                           aliases=cmd.aliases or (),
                                            description=desc)
         patch_parser(cmd_parser)
 
@@ -518,10 +541,11 @@ def main(module='__main__', prog=None, shell=False, args=None):
             cmd_args = parser.parse_args(args)
             func = cmd_args.func
         except ArgParseError, exc:
-            # TODO clean this up and try to use the real error function found
-            # in the argparse package (it's patched away, so this mimics it)
-            sys.stderr.write(parser.format_usage())
-            sys.stderr.write('%s: error: %s\n' % (parser.prog, exc.error))
+            if exc.status:
+                # TODO clean this up and try to use the real error function found
+                # in the argparse package (it's patched away, so this mimics it)
+                sys.stderr.write(parser.format_usage())
+                sys.stderr.write('%s: error: %s\n' % (parser.prog, exc.error))
             return sys.exit(exc.status)
 
     # run the command and send exit if successful

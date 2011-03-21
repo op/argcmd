@@ -18,7 +18,6 @@ class pysh(argcmd.ArgCmd):
         parser.add_argument('-a', '--all', action='store_true', help='do not ignore entries starting with .')
         parser.add_argument('paths', metavar='PATH', nargs='*', default='.', help='directories to list')
 
-    # TODO broken
     # manually registered with decorator
     @argcmd.argument('test')
     @argcmd.command(args='args_ls')
@@ -43,6 +42,7 @@ class pysh(argcmd.ArgCmd):
         print os.path.realpath(os.curdir)
 
     # adding arguments using decorator
+    @argcmd.alias('test')
     @argcmd.argument('args', metavar='ARG', nargs='+', help='code to execute')
     def cmd_eval(self, args):
         """execute arguments as python code"""
