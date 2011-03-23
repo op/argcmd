@@ -32,10 +32,10 @@ added as argument to the ``@command``-decorator, -- or you can use the
     import argcmd
 
     class Example(argcmd.ArgCmd):
-        def init(self):
+        def start(self):
             self.calls = 0
 
-        def exit(self):
+        def stop(self):
             print 'called:', self.calls
 
         @argcmd.argument('arg', help='arg help')
@@ -59,5 +59,5 @@ If this library is not for you, don't worry. Many great projects by great
 people exists with similar goals as this one.
 
 * https://github.com/anandology/subcommand/
-* https://github.com/simonw/optfunc
+* https://github.com/simonw/optfunc/
 * http://code.google.com/p/cmdln/

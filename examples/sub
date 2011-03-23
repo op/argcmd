@@ -14,6 +14,7 @@ def foo(args):
     print args.arg
 
 
+@argcmd.argument_group('my group')
 @argcmd.argument('arg', help='arg help')
 def bar(args):
     """Registered via name"""

@@ -5,19 +5,18 @@ import argcmd
 
 
 class Example(argcmd.ArgCmd):
-    def init(self):
+    def start(self):
         self.calls = 0
 
-    def exit(self):
+    def stop(self):
         print 'called:', self.calls
 
     @argcmd.argument('arg', help='arg help')
-    def bar(self, args):
-        print 'yey', self
-        print dir(self)
+    def cmd_bar(self, args):
+        """function desc"""
         self.calls += 1
         print 'arg:', args.arg
 
 
 if __name__ == '__main__':
-	argcmd.main()
+	argcmd.main(shell=True)

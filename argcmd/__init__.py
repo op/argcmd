@@ -17,7 +17,8 @@ and args_). The first is less magic and also recommended.
 # - add colorize function
 # - add logging
 # - beatify errors
-# - check cmd module out
+# - make API tighter
+# - check python cmd module out
 
 import argparse
 import atexit
@@ -28,11 +29,13 @@ import readline
 import sys
 import traceback
 
+from argcmd import trie
 from gettext import gettext as _
 
 # prefix for functions to find automatic
 CMD_NAME = 'cmd_'
 ARGS_NAMES = ['arg_', 'args_', 'opts_']
+ATTR_NAME = 'argcmd'
 
 # error exit codes
 RC_OK = 0
@@ -78,7 +81,7 @@ def _dir_obj(obj):
 def _get_callables(obj, filtered=True):
     return dict((name, attr) for name, attr in _dir_obj(obj)
                              if callable(attr) and
-                                (not filtered or not isinstance(attr, command)))
+                                (not filtered or not command.is_command(obj)))
 
 
 def _get_cmd_name(name):
@@ -108,13 +111,16 @@ def _get_commands(module):
 
     # find all callables and callables for inherited
     callables = _get_callables(module)
+    cmd_inst = {}
     for argcmd in argcmds:
         obj = argcmd()
         obj_callables = _get_callables(obj, False)
         for name, f in obj_callables.items():
-            if isinstance(f, command):
+            cmd_inst[name] = obj
+            if command.is_command(f):
+                cmd = command.get_command(f)
+                cmd._set_instance(obj, True)
                 obj_callables.pop(name)
-                command._setup_command(obj, f)
 
         callables.update(obj_callables)
 
@@ -122,7 +128,8 @@ def _get_commands(module):
     for name, func in callables.iteritems():
         cmd_name = _get_cmd_name(name)
         if cmd_name is not None:
-            yield func, _get_args_func(cmd_name, callables)
+            inst = cmd_inst.get(name)
+            yield inst, func, _get_args_func(cmd_name, callables)
 
 
 _indent_re = re.compile(r'(\s+)\S')
@@ -152,8 +159,8 @@ class _CommandExecutor(object):
     """
     states = {}
 
-    __setup_func = 'init'
-    __teardown_func = 'exit'
+    __setup_func = 'start'
+    __teardown_func = 'stop'
 
     def __init__(self, func):
         self.func = func
@@ -163,21 +170,21 @@ class _CommandExecutor(object):
 
     @classmethod
     def _call_once(cls, obj, func_name):
-        if hasattr(obj, 'im_self'):
-            states = cls.states.setdefault(func_name, {})
-            if obj.im_self not in states:
-                states[obj.im_self] = getattr(obj.im_self, func_name)()
-            return states[obj.im_self]
+        states = cls.states.setdefault(func_name, {})
+        if obj.__class__ not in states:
+            states[obj.__class__] = getattr(obj, func_name)()
+        return states[obj.__class__]
 
-    def __call__(self, *args, **kwargs):
-        self._call_once(self.func, self.__setup_func)
-        return self.func(*args, **kwargs)
-
-    def exit(self):
-        if hasattr(self.func, 'im_self'):
+    def tear_down(self, obj):
+        if obj:
             states = self.states.get(self.__setup_func)
-            if states is not None and self.func.im_self in states:
-                return self._call_once(self.func, self.__teardown_func)
+            if states is not None and obj.__class__ in states:
+                return self._call_once(obj, self.__teardown_func)
+
+    def __call__(self, obj, *args, **kwargs):
+        if obj is not None:
+            self._call_once(obj, self.__setup_func)
+        return self.func(*args, **kwargs)
 
 
 class command(object):
@@ -188,61 +195,103 @@ class command(object):
     __commands = {}
 
     @classmethod
+    def is_command(cls, obj):
+        return hasattr(obj, ATTR_NAME)
+
+    @classmethod
+    def _add_command(cls, obj, f, *args, **kwargs):
+        wrapper = command(*args, **kwargs)(f)
+        if obj:
+            cmd = cls.get_command(wrapper)
+            cmd._set_instance(obj)
+        return wrapper
+
+    @classmethod
+    def _set_command(cls, obj, command):
+        assert not cls.is_command(obj), 'Command is already registered'
+        return setattr(obj, ATTR_NAME, command)
+
+    @classmethod
+    def get_command(cls, obj):
+        return getattr(obj, ATTR_NAME, None)
+
+    @classmethod
     def _get_commands(cls):
         return cls.__commands.itervalues()
 
     @classmethod
-    def _slugify(cls, f):
-        name = f.func_name.replace(CMD_NAME, '', 1)
-        return name.replace('_', '-')
-
-    @classmethod
-    def _setup_command(cls, obj, f):
-        # FIXME we shouldn't need to do this. the problem occurs when adding
-        # a decorator to a method of ArgCmd subclass. the __call__ below will
-        # occur before any object exists, hence the registered function will be
-        # missing a proper self object. this is a quick fix to add self to it.
-        f.func.func = functools.partial(f.temp, obj)
-        f.func.func.__doc__ = f.temp.__doc__
+    def tear_down(self):
+        for cmd in command._get_commands():
+            cmd.func.tear_down(cmd.inst)
 
     @classmethod
     def _reset(cls):
         cls.__commands = {}
+        _CommandExecutor.states = {}
 
     def __init__(self, args=None, alias=None):
         self.name = None
         self.func = None
-        self.args = args
+        self.inst = None
 
-        if alias and isinstance(alias, basestring):
-            alias = [alias]
-        self.aliases = alias
+        self.parser_funcs = []
+        if args:
+            self.add_parser_func(args)
 
-    def __call__(self, *args, **kwargs):
-        if self.func is None:
-            return self._register_command(*args, **kwargs)
-        else:
-            return self.func(*args, **kwargs)
+        self.aliases = []
+        if alias:
+            self.add_alias(alias)
 
-    def _register_command(self, f):
+    def __call__(self, f):
+        # create a wraper to make us able to add attributes
+        def command_wrapper(*args, **kwargs):
+            return f(*args, **kwargs)
+
+        self._register_command(f)
+        self._set_command(command_wrapper, self)
         assert f is not None, 'Invalid function'
 
-        self.name = self._slugify(f)
+        command_wrapper.__name__ = f.__name__
+        command_wrapper.__doc__  = f.__doc__
+
+        return command_wrapper
+
+    def execute(self, *args, **kwargs):
+        return self.func(self.inst, *args, **kwargs)
+
+    def _set_instance(self, obj, bind=False):
+        self.inst = obj
+
+        # make sure we call functions with self
+        if bind:
+            f = functools.partial(self.func.func, obj)
+            f.__doc__ = self.func.func.__doc__
+            self.func.func = f
+
+    def _register_command(self, f):
         self.func = _CommandExecutor(f)
-        self.temp = f
-
-        # XXX needed?
-        self.__name__ = f.__name__
-
+        self.name = f.func_name.replace(CMD_NAME, '', 1).replace('_', '-')
         if self.name in self.__commands:
-            raise KeyError('Duplicate command handler: ' + f.func_name)
+            raise KeyError('Duplicate command handler: ' + self.name)
 
         self.__commands[self.name] = self
-        return self
 
-    def _add_arguments(self, parser):
-        if callable(self.args):
-            self.args(parser)
+    def add_alias(self, alias):
+        if isinstance(alias, basestring):
+            alias = [alias]
+        self.aliases.extend(alias)
+
+    def add_parser_func(self, func, front=False):
+        if front:
+            self.parser_funcs.insert(0, func)
+        else:
+            self.parser_funcs.append(func)
+
+    def _setup_parser(self, parser):
+        for parser_func in self.parser_funcs:
+            if isinstance(parser_func, basestring):
+                parser_func = getattr(self.inst, parser_func)
+            parser = parser_func(parser)
 
 
 class _ExtraDecorator(object):
@@ -250,19 +299,32 @@ class _ExtraDecorator(object):
         self.args = args
         self.kwargs = kwargs
 
-    def __call__(self, f, *args, **kwargs):
-        if not isinstance(f, command):
-            cmd = command()(f, *args, **kwargs)
+    def __call__(self, f):
+        # we do not require people to use @argcmd.command(), hence it's
+        # possible that the command has not been registered before. check here
+        # and register the command.
+        cmd = command.get_command(f)
+        if cmd is None:
+            wrapper = command._add_command(None, f)
+            cmd = command.get_command(wrapper)
 
-            if cmd.args is None:
-                callables = _get_callables(f.__module__)
-                cmd_name = _get_cmd_name(f.func_name)
-                if cmd_name is not None:
-                    cmd.args = _get_args_func(cmd_name, callables)
+            # automatically register arg_ function
+            callables = _get_callables(f.__module__)
+            cmd_name = _get_cmd_name(f.func_name)
+            if cmd_name is not None:
+                parser_func = _get_args_func(cmd_name, callables)
+                if parser_func:
+                    cmd.add_parser_func(parser_func)
         else:
-            cmd = f
+            wrapper = f
 
-        return cmd
+        cmd = command.get_command(wrapper)
+        self.register(cmd, *self.args, **self.kwargs)
+
+        return wrapper
+
+    def register(self, cmd, *args, **kwargs):
+        pass
 
 
 class alias(_ExtraDecorator):
@@ -273,21 +335,8 @@ class alias(_ExtraDecorator):
     Arguments:
         alias       -- alias(es) to be added (str or iterable)
     """
-    def __call__(self, f, *args, **kwargs):
-        cmd = super(alias, self).__call__(f, *args, **kwargs)
-
-        # be lazy and let python handle keyword args etc
-        self._add_aliases(cmd, *self.args, **self.kwargs)
-
-        return cmd
-
-    def _add_aliases(self, cmd, alias):
-        # combine all aliases and retain order
-        if isinstance(alias, basestring):
-            alias = [alias]
-        if cmd.aliases is None:
-            cmd.aliases = []
-        cmd.aliases = sum((cmd.aliases, alias), [])
+    def register(self, cmd, alias):
+        cmd.add_alias(alias)
 
 
 class argument(_ExtraDecorator):
@@ -296,19 +345,23 @@ class argument(_ExtraDecorator):
     See ``argparse`` for syntax. Example:
         @argcmd.argument('-f', '--foobar', ...)
     """
-    def __call__(self, f, *args, **kwargs):
-        cmd = super(argument, self).__call__(f, *args, **kwargs)
+    def register(self, cmd, *args, **kwargs):
+        def add_argument(parser):
+            parser.add_argument(*args, **kwargs)
+            return parser
+        cmd.add_parser_func(add_argument, True)
 
-        # chain the old args function together
-        def args_wrapper(parser):
-            parser.add_argument(*self.args, **self.kwargs)
-            if args_wrapper.args is not None:
-                args_wrapper.args(parser)
 
-        args_wrapper.args = cmd.args
-        cmd.args = args_wrapper
+class argument_group(_ExtraDecorator):
+    """Add argument group decorator
 
-        return cmd
+    See ``argparse`` for syntax. Example:
+        @argcmd.argument_group('group')
+    """
+    def register(self, cmd, *args, **kwargs):
+        def add_argument_group(parser):
+            return parser.add_argument_group(*args, **kwargs)
+        cmd.add_parser_func(add_argument_group, True)
 
 
 class ArgCmd(object):
@@ -329,17 +382,12 @@ class ArgCmd(object):
                     prev.args = getattr(obj, f)
         return obj
 
-    def init(self):
+    def start(self):
         """Called before first command is run"""
         pass
 
-    def exit(self):
-        """Called before exiting
-
-        If run as single command, only called if no exception raised.
-        If run in shell, always called.
-
-        Note: This is subject to change."""
+    def stop(self):
+        """Called before exiting"""
         pass
 
 
@@ -354,18 +402,14 @@ def add_shell_args(parser, prog):
 
 def run_shell(parser, args):
     """Interactive shell"""
-    # tokenize command names for partial searching
-    # TODO use a real binary tree
-    partials = {}
+    words = trie.Trie()
     for cmd in command._get_commands():
-        for n in range(len(cmd.name)+1):
-            partials.setdefault(cmd.name[0:n],[]).append(cmd.name)
+        words.insert(cmd.name)
+
     def complete(text, state):
-        matches = partials.get(text)
+        matches = [w for w in words.search(text)]
         if matches and state < len(matches):
             return matches[state]
-        else:
-            return None
 
     readline.parse_and_bind('tab: complete')
     readline.set_completer(complete)
@@ -382,6 +426,7 @@ def run_shell(parser, args):
     # command line loop
     while True:
         try:
+            # TODO add get_prompt callback
             line = raw_input('>>> ').strip()
         except (EOFError, KeyboardInterrupt):
             print ''
@@ -488,8 +533,8 @@ def _setup_parsers(prog):
                                            description=desc)
         patch_parser(cmd_parser)
 
-        cmd_parser.set_defaults(func=cmd)
-        cmd._add_arguments(cmd_parser)
+        cmd_parser.set_defaults(func=cmd.execute)
+        cmd._setup_parser(cmd_parser)
 
     return parsers
 
@@ -512,8 +557,8 @@ def main(module='__main__', prog=None, shell=False, args=None):
     """
     # automatically populate commands found in module
     if module is not None:
-        for cmd_func, cmd_args in _get_commands(module):
-            command(args=cmd_args)(cmd_func)
+        for cmd_inst, cmd_func, cmd_args in _get_commands(module):
+            command._add_command(cmd_inst, cmd_func, cmd_args)
 
     shell_parser, parser = _setup_parsers(prog)
     func = None
@@ -550,8 +595,7 @@ def main(module='__main__', prog=None, shell=False, args=None):
 
     # run the command and send exit if successful
     exc, code = _run_command(func, cmd_args)
-    if exc is None:
-        for cmd in command._get_commands():
-            cmd.func.exit()
+    # XXX only call tear_down if exc is None? pass exception?
+    command.tear_down()
 
     return sys.exit(code)

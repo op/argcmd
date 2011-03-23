@@ -23,7 +23,8 @@ class Example(argcmd.ArgCmd):
         print args.arg
 
     def args_bar(self, parser):
-        parser.add_argument('arg', help='arg help')
+        group = parser.add_argument_group('my group')
+        group.add_argument('arg', help='arg help')
 
     def cmd_bar(self, args):
         """Registered via name"""

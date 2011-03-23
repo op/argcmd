@@ -6,12 +6,12 @@ import os
 
 
 class pysh(argcmd.ArgCmd):
-    # init callback
-    def init(self):
+    # start callback
+    def start(self):
         self.pwd = os.getcwd()
 
-    # exit callback
-    def exit(self):
+    # stop callback
+    def stop(self):
         os.chdir(self.pwd)
 
     def args_ls(self, parser):
@@ -19,7 +19,7 @@ class pysh(argcmd.ArgCmd):
         parser.add_argument('paths', metavar='PATH', nargs='*', default='.', help='directories to list')
 
     # manually registered with decorator
-    @argcmd.argument('test')
+    @argcmd.alias('dir')
     @argcmd.command(args='args_ls')
     def cmd_ls(self, args):
         """list files and directories"""
@@ -42,7 +42,6 @@ class pysh(argcmd.ArgCmd):
         print os.path.realpath(os.curdir)
 
     # adding arguments using decorator
-    @argcmd.alias('test')
     @argcmd.argument('args', metavar='ARG', nargs='+', help='code to execute')
     def cmd_eval(self, args):
         """execute arguments as python code"""
